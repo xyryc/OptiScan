@@ -45,6 +45,8 @@ export default function ScanScreen() {
       setIsCameraActive(true);
       return () => {
         setIsCameraActive(false);
+        // Turn off torch when leaving screen
+        setTorch(false);
       };
     }, [])
   );
@@ -108,6 +110,9 @@ export default function ScanScreen() {
     
     setIsScanning(false);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    
+    // Turn off torch when scan completes
+    setTorch(false);
     
     setScanResult({ type, data });
     setShowBottomSheet(true);
