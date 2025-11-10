@@ -1,0 +1,18 @@
+import { Stack } from 'expo-router';
+import { useColorScheme } from 'react-native';
+import '../global.css';
+
+export default function RootLayout() {
+  const colorScheme = useColorScheme();
+
+  return (
+    <Stack
+      screenOptions={{
+        headerShown: false,
+        contentStyle: {
+          backgroundColor: colorScheme === 'dark' ? '#000000' : '#FFFFFF',
+        },
+      }}
+    />
+  );
+}
