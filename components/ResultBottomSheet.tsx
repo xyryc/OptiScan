@@ -15,6 +15,7 @@ import {
   Platform,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as Linking from 'expo-linking';
@@ -36,9 +37,13 @@ const ResultBottomSheet: React.FC<ResultBottomSheetProps> = ({
 }) => {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
+  const insets = useSafeAreaInsets();
   
   const screenHeight = Dimensions.get('window').height;
   const sheetHeight = screenHeight * 0.50;
+  
+  // Add padding for safe area (home indicator on newer iPhones)
+  const bottomPadding = Math.max(insets.bottom, 16) + 32;
   
   const translateY = useRef(new Animated.Value(sheetHeight)).current;
   const overlayOpacity = useRef(new Animated.Value(0)).current;
@@ -218,6 +223,7 @@ const ResultBottomSheet: React.FC<ResultBottomSheetProps> = ({
           
           <ScrollView 
             style={styles.contentScroll}
+            contentContainerStyle={{ paddingBottom: bottomPadding }}
             showsVerticalScrollIndicator={false}
             bounces={false}
           >

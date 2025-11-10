@@ -3,13 +3,14 @@ import { View, Text, StyleSheet, useColorScheme, TouchableOpacity, Animated, Ale
 import { StatusBar } from 'expo-status-bar';
 import { CameraView, Camera, BarcodeScanningResult } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useNavigation } from 'expo-router';
 import { useCallback } from 'react';
 import ResultBottomSheet from '@/components/ResultBottomSheet';
 
 export default function ScanScreen() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
+  const navigation = useNavigation();
   
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isScanning, setIsScanning] = useState(true);
@@ -31,6 +32,13 @@ export default function ScanScreen() {
       startReticleAnimation();
     }
   }, [isScanning, isCameraActive]);
+  
+  // Hide tab bar when bottom sheet is visible
+  useEffect(() => {
+    navigation.setOptions({
+      tabBarStyle: showBottomSheet ? { display: 'none' } : undefined,
+    });
+  }, [showBottomSheet, navigation]);
   
   useFocusEffect(
     useCallback(() => {
