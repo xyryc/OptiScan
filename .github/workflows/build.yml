@@ -1,11 +1,22 @@
 name: Build Signed Android APK/AAB
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
+  # Manual trigger (always available)
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+  
+  # Only on version tags
+  push:
+    tags:
+      - 'v*.*.*'
 
 jobs:
   build-android:
