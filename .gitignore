@@ -41,7 +41,8 @@ yarn-error.*
 /android
 
 release.keystore
-keystore.txt*.keystore
+keystore.txt
+*.keystore
 *.jks
 keystore.properties
 android/keystore.properties
