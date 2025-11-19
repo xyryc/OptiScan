@@ -1,7 +1,6 @@
 name: Build Signed Android APK/AAB
 
 on:
-  # Manual trigger (always available)
   workflow_dispatch:
     inputs:
       build_type:
@@ -12,8 +11,6 @@ on:
         options:
           - debug
           - release
-  
-  # Only on version tags
   push:
     tags:
       - 'v*.*.*'
@@ -39,19 +36,19 @@ jobs:
           java-version: '17'
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps  # Added --legacy-peer-deps for tailwind conflict
+        run: npm install --legacy-peer-deps
 
-      - name: Expo Prebuild
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+
+      - name: Expo Prebuild with signing
         run: npx expo prebuild --platform android --clean
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-home-cache-cleanup: true
-
-      - name: Decode Keystore
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
 
       - name: Create keystore.properties
         run: |
@@ -60,11 +57,31 @@ jobs:
           echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/keystore.properties
           echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/keystore.properties
 
+      - name: Configure Gradle for release signing
+        run: |
+          # Inject signing config into build.gradle
+          cat >> android/app/build.gradle << 'EOF'
+          
+          android.signingConfigs {
+              release {
+                  def keystorePropertiesFile = rootProject.file("keystore.properties")
+                  if (keystorePropertiesFile.exists()) {
+                      def keystoreProperties = new Properties()
+                      keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+                      
+                      storeFile file(keystoreProperties['storeFile'])
+                      storePassword keystoreProperties['storePassword']
+                      keyAlias keystoreProperties['keyAlias']
+                      keyPassword keystoreProperties['keyPassword']
+                  }
+              }
+          }
+          
+          android.buildTypes.release.signingConfig = android.signingConfigs.release
+          EOF
+
       - name: Make gradlew executable
         run: chmod +x android/gradlew
-
-      - name: Clear Gradle Cache
-        run: rm -rf ~/.gradle/caches
 
       - name: Build Signed APK
         run: cd android && ./gradlew assembleRelease --no-daemon --stacktrace
@@ -72,6 +89,12 @@ jobs:
       - name: Build Signed AAB
         run: cd android && ./gradlew bundleRelease --no-daemon --stacktrace
 
+      - name: Verify APK signature
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "Checking signature of: $APK_PATH"
+          unzip -p "$APK_PATH" META-INF/CERT.RSA | keytool -printcert | grep SHA1
+          
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -85,20 +108,6 @@ jobs:
           name: app-release-aab
           path: android/app/build/outputs/bundle/release/*.aab
           retention-days: 30
-
-      - name: Create Release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ github.run_number }}
-          name: Release v${{ github.run_number }}
-          body: |
-            Automated build from commit ${{ github.sha }}
-          files: |
-            android/app/build/outputs/apk/release/*.apk
-            android/app/build/outputs/bundle/release/*.aab
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup keystore
         if: always()
