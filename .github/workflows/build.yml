@@ -38,12 +38,12 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Expo Prebuild with signing
+        run: npx expo prebuild --platform android --clean
+
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-
-      - name: Expo Prebuild with signing
-        run: npx expo prebuild --platform android --clean
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
