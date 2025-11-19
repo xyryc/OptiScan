@@ -67,10 +67,10 @@ jobs:
         run: rm -rf ~/.gradle/caches
 
       - name: Build Signed APK
-        run: cd android && ./gradlew assembleRelease --no-daemon --stacktrace --retry=3
+        run: cd android && ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Build Signed AAB
-        run: cd android && ./gradlew bundleRelease --no-daemon --stacktrace --retry=3
+        run: cd android && ./gradlew bundleRelease --no-daemon --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
