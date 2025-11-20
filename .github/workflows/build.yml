@@ -38,17 +38,19 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Expo Prebuild with signing
+      - name: Expo Prebuild
         run: npx expo prebuild --platform android --clean
-
-      - name: Decode Keystore
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-home-cache-cleanup: true
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+          ls -lh android/app/release.keystore
+          echo "✅ Keystore decoded successfully"
 
       - name: Create keystore.properties
         run: |
@@ -56,61 +58,148 @@ jobs:
           echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> android/keystore.properties
           echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/keystore.properties
           echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/keystore.properties
+          cat android/keystore.properties
+          echo "✅ keystore.properties created"
 
       - name: Configure Gradle for release signing
         run: |
-          # Inject signing config into build.gradle
-          cat >> android/app/build.gradle << 'EOF'
+          # Create a Python script to properly inject the signing config
+          cat > /tmp/inject_signing.py << 'PYTHON'
+          import re
           
-          android.signingConfigs {
-              release {
-                  def keystorePropertiesFile = rootProject.file("keystore.properties")
-                  if (keystorePropertiesFile.exists()) {
-                      def keystoreProperties = new Properties()
-                      keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-                      
-                      storeFile file(keystoreProperties['storeFile'])
-                      storePassword keystoreProperties['storePassword']
-                      keyAlias keystoreProperties['keyAlias']
-                      keyPassword keystoreProperties['keyPassword']
+          with open('android/app/build.gradle', 'r') as f:
+              content = f.read()
+          
+          # Check if signingConfigs already exists
+          if 'signingConfigs {' in content:
+              print("⚠️ signingConfigs already exists")
+              # Find and update the release buildType
+              content = re.sub(
+                  r'(buildTypes\s*\{[^}]*release\s*\{)',
+                  r'\1\n            signingConfig signingConfigs.release',
+                  content
+              )
+          else:
+              print("Adding signingConfigs...")
+              # Find the android block and add signingConfigs after defaultConfig
+              signing_config = '''
+              signingConfigs {
+                  release {
+                      def keystorePropertiesFile = rootProject.file("keystore.properties")
+                      if (keystorePropertiesFile.exists()) {
+                          def keystoreProperties = new Properties()
+                          keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+                          
+                          storeFile file(keystoreProperties['storeFile'])
+                          storePassword keystoreProperties['storePassword']
+                          keyAlias keystoreProperties['keyAlias']
+                          keyPassword keystoreProperties['keyPassword']
+                      }
                   }
               }
-          }
+          '''
+              # Insert after defaultConfig closing brace
+              content = re.sub(
+                  r'(defaultConfig\s*\{[^}]*\})',
+                  r'\1\n' + signing_config,
+                  content,
+                  flags=re.DOTALL
+              )
+              
+              # Update release buildType to use signing config
+              content = re.sub(
+                  r'(buildTypes\s*\{[^}]*release\s*\{)',
+                  r'\1\n            signingConfig signingConfigs.release',
+                  content
+              )
           
-          android.buildTypes.release.signingConfig = android.signingConfigs.release
-          EOF
+          with open('android/app/build.gradle', 'w') as f:
+              f.write(content)
+          
+          print("✅ Signing configuration injected")
+          PYTHON
+          
+          python3 /tmp/inject_signing.py
+          
+          echo "=== Checking build.gradle ==="
+          grep -A 10 "signingConfigs" android/app/build.gradle || echo "⚠️ signingConfigs not found"
+          grep -A 5 "buildTypes" android/app/build.gradle || echo "⚠️ buildTypes not found"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
       - name: Build Signed APK
-        run: cd android && ./gradlew assembleRelease --no-daemon --stacktrace
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace --info | tee build.log
+          echo "=== Build completed ==="
 
       - name: Build Signed AAB
-        run: cd android && ./gradlew bundleRelease --no-daemon --stacktrace
+        run: |
+          cd android
+          ./gradlew bundleRelease --no-daemon --stacktrace
 
-      - name: Verify APK signature
+      - name: Verify signing
         run: |
           APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-          echo "Checking signature of: $APK_PATH"
-          unzip -p "$APK_PATH" META-INF/CERT.RSA | keytool -printcert | grep SHA1
+          echo "📦 APK Path: $APK_PATH"
           
+          if [ ! -f "$APK_PATH" ]; then
+            echo "❌ APK not found!"
+            exit 1
+          fi
+          
+          echo "=== APK Contents ==="
+          unzip -l "$APK_PATH" | grep META-INF
+          
+          echo "=== Certificate Info ==="
+          # Try different certificate filenames
+          if unzip -p "$APK_PATH" META-INF/CERT.RSA 2>/dev/null | keytool -printcert 2>/dev/null; then
+            echo "✅ Found CERT.RSA"
+          elif unzip -p "$APK_PATH" META-INF/*.RSA 2>/dev/null | keytool -printcert 2>/dev/null; then
+            echo "✅ Found RSA certificate"
+          else
+            echo "⚠️ Checking all META-INF files..."
+            unzip -l "$APK_PATH" | grep META-INF
+            
+            # Extract and check signature
+            CERT_FILE=$(unzip -l "$APK_PATH" | grep -o "META-INF/[^.]*\.RSA" | head -1)
+            if [ -n "$CERT_FILE" ]; then
+              echo "Found certificate: $CERT_FILE"
+              unzip -p "$APK_PATH" "$CERT_FILE" | keytool -printcert
+            else
+              echo "❌ No RSA certificate found - APK might not be signed!"
+              exit 1
+            fi
+          fi
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
+          name: app-release-apk-${{ github.run_number }}
           path: android/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-aab
+          name: app-release-aab-${{ github.run_number }}
           path: android/app/build/outputs/bundle/release/*.aab
           retention-days: 30
+
+      - name: Upload build logs (if failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            android/build.log
+            android/app/build.gradle
+          retention-days: 7
 
       - name: Cleanup keystore
         if: always()
         run: |
           rm -f android/app/release.keystore
           rm -f android/keystore.properties
+          echo "✅ Cleanup completed"
