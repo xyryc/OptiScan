@@ -55,13 +55,21 @@ jobs:
 
       - name: Setup signing in gradle.properties
         run: |
+          echo "📝 Setting up gradle.properties..."
           cat >> android/gradle.properties << EOF
           MYAPP_RELEASE_STORE_FILE=release.keystore
           MYAPP_RELEASE_KEY_ALIAS=${{ secrets.KEY_ALIAS }}
           MYAPP_RELEASE_STORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}
           MYAPP_RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
           EOF
+          
           echo "✅ gradle.properties configured"
+          echo ""
+          echo "📋 Verification (with secrets masked):"
+          cat android/gradle.properties | grep MYAPP_RELEASE_STORE_FILE
+          echo "MYAPP_RELEASE_KEY_ALIAS=***"
+          echo "MYAPP_RELEASE_STORE_PASSWORD=***"
+          echo "MYAPP_RELEASE_KEY_PASSWORD=***"
 
       - name: Configure build.gradle for signing
         run: |
@@ -75,17 +83,15 @@ jobs:
           # Step 1: Comment out Expo's debug signing in release buildType
           sed -i 's/signingConfig signingConfigs\.debug/\/\/ signingConfig signingConfigs.debug (disabled)/g' "$BUILD_GRADLE"
           
-          # Step 2: Create signing config block using echo
+          # Step 2: Create signing config block using echo (without if condition)
           {
             echo ""
             echo "    signingConfigs {"
             echo "        release {"
-            echo "            if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {"
-            echo "                storeFile file(MYAPP_RELEASE_STORE_FILE)"
-            echo "                storePassword MYAPP_RELEASE_STORE_PASSWORD"
-            echo "                keyAlias MYAPP_RELEASE_KEY_ALIAS"
-            echo "                keyPassword MYAPP_RELEASE_KEY_PASSWORD"
-            echo "            }"
+            echo "            storeFile file('release.keystore')"
+            echo "            storePassword MYAPP_RELEASE_STORE_PASSWORD"
+            echo "            keyAlias MYAPP_RELEASE_KEY_ALIAS"
+            echo "            keyPassword MYAPP_RELEASE_KEY_PASSWORD"
             echo "        }"
             echo "    }"
           } > /tmp/signing_block.gradle
@@ -116,9 +122,25 @@ jobs:
       - name: Clean previous builds
         run: cd android && ./gradlew clean
 
+      - name: Verify gradle.properties before build
+        run: |
+          echo "📋 Checking gradle.properties..."
+          cat android/gradle.properties | grep MYAPP_ || echo "⚠️ Properties not found in gradle.properties"
+          
+          echo ""
+          echo "📋 Checking if keystore exists..."
+          ls -lh android/app/release.keystore || echo "❌ Keystore not found!"
+          
+          echo ""
+          echo "📋 Testing property access..."
+          cd android
+          ./gradlew properties | grep MYAPP_ || echo "⚠️ Gradle cannot see MYAPP properties"
+
       - name: Build Signed APK with explicit signing
         run: |
           cd android
+          
+          echo "🔨 Building with signing..."
           ./gradlew assembleRelease \
             -PMYAPP_RELEASE_STORE_FILE=release.keystore \
             -PMYAPP_RELEASE_KEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
@@ -128,11 +150,12 @@ jobs:
             --stacktrace \
             --info 2>&1 | tee build.log
           
-          # Check if signing was applied
-          if grep -q "Signing.*release" build.log; then
+          echo ""
+          echo "📋 Checking build log for signing..."
+          if grep -i "signing" build.log | grep -i "release"; then
             echo "✅ Signing configuration was used"
           else
-            echo "⚠️ Warning: Signing might not have been applied"
+            echo "⚠️ Warning: No signing activity detected"
           fi
 
       - name: Build Signed AAB with explicit signing
