@@ -67,13 +67,20 @@ jobs:
         run: |
           BUILD_GRADLE="android/app/build.gradle"
           
-          echo "📝 Original build.gradle structure:"
-          grep -n "android {" "$BUILD_GRADLE" | head -5
+          echo "📝 Configuring signing..."
           
           # Create backup
           cp "$BUILD_GRADLE" "${BUILD_GRADLE}.backup"
           
-          # Add signingConfigs block after defaultConfig
+          # CRITICAL: Remove Expo's default debug signing for release builds
+          # This line "signingConfig signingConfigs.debug" appears in the release buildType
+          sed -i '/release {/,/^[[:space:]]*}/ {
+              /signingConfig signingConfigs.debug/d
+          }' "$BUILD_GRADLE"
+          
+          echo "✅ Removed debug signing from release buildType"
+          
+          # Add our custom signingConfigs block after defaultConfig
           cat > /tmp/add_signing.awk << 'AWK'
           /defaultConfig {/ {
               in_default_config = 1
@@ -110,20 +117,13 @@ jobs:
           awk -f /tmp/add_signing.awk "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
           mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
           
-          # Add signingConfig to release buildType
-          sed -i.bak '/buildTypes {/,/release {/ {
-              /release {/ {
-                  a\            signingConfig signingConfigs.release
-              }
-          }' "$BUILD_GRADLE"
+          # Add signingConfig to release buildType (at the beginning)
+          sed -i '/release {/a\            signingConfig signingConfigs.release' "$BUILD_GRADLE"
           
           echo "✅ Signing configuration added"
           echo ""
-          echo "📋 Verification - signingConfigs section:"
-          grep -A 12 "signingConfigs {" "$BUILD_GRADLE" || echo "⚠️ signingConfigs not found!"
-          echo ""
-          echo "📋 Verification - buildTypes section:"
-          grep -A 8 "buildTypes {" "$BUILD_GRADLE" || echo "⚠️ buildTypes not found!"
+          echo "📋 Final verification - release buildType:"
+          grep -A 15 "release {" "$BUILD_GRADLE" | head -20
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
