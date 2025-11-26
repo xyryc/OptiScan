@@ -72,58 +72,43 @@ jobs:
           # Create backup
           cp "$BUILD_GRADLE" "${BUILD_GRADLE}.backup"
           
-          # CRITICAL: Remove Expo's default debug signing for release builds
-          # This line "signingConfig signingConfigs.debug" appears in the release buildType
-          sed -i '/release {/,/^[[:space:]]*}/ {
-              /signingConfig signingConfigs.debug/d
+          # Step 1: Comment out Expo's debug signing in release buildType
+          sed -i 's/signingConfig signingConfigs\.debug/\/\/ signingConfig signingConfigs.debug (disabled)/g' "$BUILD_GRADLE"
+          
+          # Step 2: Create signing config block using echo
+          {
+            echo ""
+            echo "    signingConfigs {"
+            echo "        release {"
+            echo "            if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {"
+            echo "                storeFile file(MYAPP_RELEASE_STORE_FILE)"
+            echo "                storePassword MYAPP_RELEASE_STORE_PASSWORD"
+            echo "                keyAlias MYAPP_RELEASE_KEY_ALIAS"
+            echo "                keyPassword MYAPP_RELEASE_KEY_PASSWORD"
+            echo "            }"
+            echo "        }"
+            echo "    }"
+          } > /tmp/signing_block.gradle
+          
+          # Step 3: Insert signing config after defaultConfig
+          LINE_NUM=$(grep -n "^    }$" "$BUILD_GRADLE" | head -1 | cut -d: -f1)
+          
+          if [ -n "$LINE_NUM" ]; then
+            head -n "$LINE_NUM" "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
+            cat /tmp/signing_block.gradle >> "${BUILD_GRADLE}.tmp"
+            tail -n +$((LINE_NUM + 1)) "$BUILD_GRADLE" >> "${BUILD_GRADLE}.tmp"
+            mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
+            echo "✅ Signing config inserted"
+          fi
+          
+          # Step 4: Add signingConfig to release buildType
+          sed -i '/buildTypes {/,/release {/ { /release {/ a\            signingConfig signingConfigs.release
           }' "$BUILD_GRADLE"
           
-          echo "✅ Removed debug signing from release buildType"
-          
-          # Add our custom signingConfigs block after defaultConfig
-          cat > /tmp/add_signing.awk << 'AWK'
-          /defaultConfig {/ {
-              in_default_config = 1
-              brace_count = 1
-              print
-              next
-          }
-          
-          in_default_config {
-              if (/\{/) brace_count++
-              if (/\}/) brace_count--
-              print
-              if (brace_count == 0 && !signing_added) {
-                  print ""
-                  print "    signingConfigs {"
-                  print "        release {"
-                  print "            if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {"
-                  print "                storeFile file(MYAPP_RELEASE_STORE_FILE)"
-                  print "                storePassword MYAPP_RELEASE_STORE_PASSWORD"
-                  print "                keyAlias MYAPP_RELEASE_KEY_ALIAS"
-                  print "                keyPassword MYAPP_RELEASE_KEY_PASSWORD"
-                  print "            }"
-                  print "        }"
-                  print "    }"
-                  signing_added = 1
-                  in_default_config = 0
-              }
-              next
-          }
-          
-          { print }
-          AWK
-          
-          awk -f /tmp/add_signing.awk "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
-          mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
-          
-          # Add signingConfig to release buildType (at the beginning)
-          sed -i '/release {/a\            signingConfig signingConfigs.release' "$BUILD_GRADLE"
-          
-          echo "✅ Signing configuration added"
+          echo "✅ Signing configuration complete"
           echo ""
-          echo "📋 Final verification - release buildType:"
-          grep -A 15 "release {" "$BUILD_GRADLE" | head -20
+          echo "📋 Verification:"
+          grep -B2 -A 15 "release {" "$BUILD_GRADLE" | head -20
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
