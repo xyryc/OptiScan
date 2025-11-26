@@ -83,15 +83,15 @@ jobs:
           # Step 1: Comment out Expo's debug signing in release buildType
           sed -i 's/signingConfig signingConfigs\.debug/\/\/ signingConfig signingConfigs.debug (disabled)/g' "$BUILD_GRADLE"
           
-          # Step 2: Create signing config block using echo (without if condition)
+          # Step 2: Create signing config block with proper property syntax
           {
             echo ""
             echo "    signingConfigs {"
             echo "        release {"
             echo "            storeFile file('release.keystore')"
-            echo "            storePassword MYAPP_RELEASE_STORE_PASSWORD"
-            echo "            keyAlias MYAPP_RELEASE_KEY_ALIAS"
-            echo "            keyPassword MYAPP_RELEASE_KEY_PASSWORD"
+            echo "            storePassword project.property('MYAPP_RELEASE_STORE_PASSWORD')"
+            echo "            keyAlias project.property('MYAPP_RELEASE_KEY_ALIAS')"
+            echo "            keyPassword project.property('MYAPP_RELEASE_KEY_PASSWORD')"
             echo "        }"
             echo "    }"
           } > /tmp/signing_block.gradle
@@ -113,8 +113,8 @@ jobs:
           
           echo "✅ Signing configuration complete"
           echo ""
-          echo "📋 Verification:"
-          grep -B2 -A 15 "release {" "$BUILD_GRADLE" | head -20
+          echo "📋 Final signing configuration:"
+          grep -A 8 "signingConfigs {" "$BUILD_GRADLE" | head -10
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
