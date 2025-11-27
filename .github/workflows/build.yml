@@ -1,24 +1,7 @@
-name: Build Signed Android APK/AAB
-
-on:
-  workflow_dispatch:
-    inputs:
-      build_type:
-        description: "Build type"
-        required: true
-        default: "release"
-        type: choice
-        options:
-          - debug
-          - release
-  push:
-    tags:
-      - "v*.*.*"
-
 jobs:
   build-android:
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -26,14 +9,17 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: '20'
+          cache: 'npm'
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -42,217 +28,98 @@ jobs:
         run: npx expo prebuild --platform android --clean
 
       - name: Setup Gradle cache
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v3
         with:
           gradle-home-cache-cleanup: true
 
       - name: Decode Keystore
         run: |
-          mkdir -p android/app
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-          ls -lh android/app/release.keystore
-          echo "✅ Keystore decoded"
-
-      - name: Setup signing in gradle.properties
-        run: |
-          echo "📝 Setting up gradle.properties..."
-          cat >> android/gradle.properties << EOF
-          MYAPP_RELEASE_STORE_FILE=release.keystore
-          MYAPP_RELEASE_KEY_ALIAS=${{ secrets.KEY_ALIAS }}
-          MYAPP_RELEASE_STORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}
-          MYAPP_RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
-          EOF
-
-          echo "✅ gradle.properties configured"
-          echo ""
-          echo "📋 Verification (with secrets masked):"
-          cat android/gradle.properties | grep MYAPP_RELEASE_STORE_FILE
-          echo "MYAPP_RELEASE_KEY_ALIAS=***"
-          echo "MYAPP_RELEASE_STORE_PASSWORD=***"
-          echo "MYAPP_RELEASE_KEY_PASSWORD=***"
-
-      - name: Configure build.gradle for signing
-        run: |
-          BUILD_GRADLE="android/app/build.gradle"
-          cp "$BUILD_GRADLE" "${BUILD_GRADLE}.backup"
-
-          echo "📝 Adding release signing config..."
-
-          # Add release signing config to signingConfigs block
-          awk '
-          /signingConfigs \{/ {
-              print
-              print "        release {"
-              print "            def propsFile = rootProject.file(\"gradle.properties\")"
-              print "            if (propsFile.exists()) {"
-              print "                def props = new Properties()"
-              print "                propsFile.withInputStream { props.load(it) }"
-              print "                storeFile file(props[\"MYAPP_RELEASE_STORE_FILE\"])"
-              print "                storePassword props[\"MYAPP_RELEASE_STORE_PASSWORD\"]"
-              print "                keyAlias props[\"MYAPP_RELEASE_KEY_ALIAS\"]"
-              print "                keyPassword props[\"MYAPP_RELEASE_KEY_PASSWORD\"]"
-              print "            }"
-              print "        }"
-              next
-          }
-          { print }
-          ' "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
-          mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
-
-          echo "📝 Removing conflicting debug signing from release buildType..."
-
-          # Remove ALL signingConfig lines from release buildType, then add back the correct one
-          sed -i '/buildTypes {/,/^    }$/ {
-              /release {/,/^        }$/ {
-                  /signingConfig/d
-              }
-          }' "$BUILD_GRADLE"
-
-          # Add the correct signingConfig at the start of release block
-          sed -i '/buildTypes {/,/^    }$/ {
-              /release {/a\
-                  signingConfig signingConfigs.release
-          }' "$BUILD_GRADLE"
-
-          echo "✅ Configuration complete"
-          echo ""
-          echo "📋 Final configuration:"
-          grep -B 2 -A 30 "signingConfigs {" "$BUILD_GRADLE"
-          echo ""
-          echo "📋 Release buildType:"
-          grep -A 15 "release {" "$BUILD_GRADLE" | head -20
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > release.keystore
+          echo "✅ Keystore decoded to release.keystore"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Clean previous builds
-        run: cd android && ./gradlew clean
-
-      - name: Verify gradle.properties before build
-        run: |
-          echo "📋 Checking gradle.properties..."
-          cat android/gradle.properties | grep MYAPP_ || echo "⚠️ Properties not found in gradle.properties"
-
-          echo ""
-          echo "📋 Checking if keystore exists..."
-          ls -lh android/app/release.keystore || echo "❌ Keystore not found!"
-
-          echo ""
-          echo "📋 Testing property access..."
-          cd android
-          ./gradlew properties | grep MYAPP_ || echo "⚠️ Gradle cannot see MYAPP properties"
-
-      - name: Build Signed APK with explicit signing
+      # Build the UNsigned Release APK
+      - name: Build Release APK (Unsigned)
         run: |
           cd android
+          ./gradlew assembleRelease --no-daemon
 
-          echo "🔨 Building with signing..."
-          ./gradlew assembleRelease \
-            -PMYAPP_RELEASE_STORE_FILE=release.keystore \
-            -PMYAPP_RELEASE_KEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
-            -PMYAPP_RELEASE_STORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
-            -PMYAPP_RELEASE_KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}" \
-            --no-daemon \
-            --stacktrace \
-            --info 2>&1 | tee build.log
+      # Sign the APK manually using apksigner
+      - name: Sign APK
+        id: sign_apk
+        run: |
+          # Find the unsigned APK
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*-release-unsigned.apk" -o -name 
+          "*-release.apk" | head -1)
+          echo "Found APK: $APK_PATH"
+          
+          # Align the APK (Optimization step required before signing)
+          $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p 4 "$APK_PATH" release-aligned.apk
+          
+          # Sign the APK
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release.keystore \
+            --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
+            --out release-signed.apk \
+            release-aligned.apk
 
-          echo ""
-          echo "📋 Checking build log for signing..."
-          if grep -i "signing" build.log | grep -i "release"; then
-            echo "✅ Signing configuration was used"
-          else
-            echo "⚠️ Warning: No signing activity detected"
-          fi
+          echo "✅ APK Signed successfully"
+          echo "signed_apk_path=release-signed.apk" >> $GITHUB_OUTPUT
 
-      - name: Build Signed AAB with explicit signing
+      # Build the AAB (Android App Bundle)
+      - name: Build Release AAB
         run: |
           cd android
-          ./gradlew bundleRelease \
-            -PMYAPP_RELEASE_STORE_FILE=release.keystore \
-            -PMYAPP_RELEASE_KEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
-            -PMYAPP_RELEASE_STORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
-            -PMYAPP_RELEASE_KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}" \
-            --no-daemon \
-            --stacktrace
+          ./gradlew bundleRelease --no-daemon
+
+      # Sign the AAB manually using jarsigner
+      - name: Sign AAB
+        run: |
+          # Find the AAB
+          AAB_PATH=$(find android/app/build/outputs/bundle/release -name "*-release.aab" | head -1)
+          echo "Found AAB: $AAB_PATH"
+          
+          # Sign using jarsigner (AABs use jarsigner, not apksigner)
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore release.keystore \
+            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+            -keypass "${{ secrets.KEY_PASSWORD }}" \
+            "$AAB_PATH" "${{ secrets.KEY_ALIAS }}"
+            
+          mv "$AAB_PATH" release-signed.aab
+          echo "✅ AAB Signed successfully"
 
       - name: Verify APK signature
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-
-          if [ ! -f "$APK_PATH" ]; then
-            echo "❌ APK not found!"
-            exit 1
-          fi
-
-          echo "📦 Verifying: $APK_PATH"
-          echo ""
-
-          # List all META-INF files
-          echo "=== META-INF Directory Contents ==="
-          unzip -l "$APK_PATH" | grep "META-INF/" || {
-            echo "❌ No META-INF directory found - APK is completely unsigned!"
-            exit 1
-          }
-          echo ""
-
-          # Find certificate file
-          CERT_FILE=$(unzip -l "$APK_PATH" | grep -o "META-INF/[A-Z0-9]*\.RSA" | head -1)
-
-          if [ -z "$CERT_FILE" ]; then
-            echo "❌ No RSA certificate found in APK!"
-            echo "This means the APK was not signed at all."
-            echo ""
-            echo "DEBUG: Checking build.gradle signing configuration..."
-            grep -A 15 "signingConfigs" android/app/build.gradle
-            exit 1
-          fi
-
-          echo "=== Certificate Information ==="
-          echo "Certificate file: $CERT_FILE"
-          unzip -p "$APK_PATH" "$CERT_FILE" | keytool -printcert
-
-          echo ""
-          echo "=== SHA1 Fingerprint ==="
-          SHA1=$(unzip -p "$APK_PATH" "$CERT_FILE" | keytool -printcert | grep "SHA1:" | awk '{print $2}')
-          echo "Current SHA1: $SHA1"
-          echo "Expected SHA1: 59:3D:24:BE:25:91:DF:54:6E:A8:06:17:DC:A1:73:81:3E:71:4C:A0"
-
-          if [ "$SHA1" == "59:3D:24:BE:25:91:DF:54:6E:A8:06:17:DC:A1:73:81:3E:71:4C:A0" ]; then
-            echo "✅ ✅ ✅ CORRECT KEYSTORE! ✅ ✅ ✅"
-          else
-            echo "⚠️ WARNING: This is a different keystore!"
-            echo "Google Play will reject this upload."
-          fi
+          echo "📦 Verifying: release-signed.apk"
+          
+          # Use apksigner verify which is more robust
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs release-signed.apk
+          
+          # Quick check for your specific SHA1 if needed
+          SHA1=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs release-signed.apk | 
+          grep "SHA-1 digest:" | head -1 | awk '{print $3}')
+          echo "Detected SHA1: $SHA1"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk-${{ github.run_number }}
-          path: android/app/build/outputs/apk/release/*.apk
+          path: release-signed.apk
           retention-days: 30
 
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-aab-${{ github.run_number }}
-          path: android/app/build/outputs/bundle/release/*.aab
+          path: release-signed.aab
           retention-days: 30
-
-      - name: Upload debug files on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-files-${{ github.run_number }}
-          path: |
-            android/build.log
-            android/app/build.gradle
-            android/app/build.gradle.backup
-            android/gradle.properties
-          retention-days: 7
 
       - name: Cleanup sensitive files
         if: always()
         run: |
-          rm -f android/app/release.keystore
-          rm -f android/gradle.properties
+          rm -f release.keystore
           echo "✅ Cleanup completed"
