@@ -4,21 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build type'
+        description: "Build type"
         required: true
-        default: 'release'
+        default: "release"
         type: choice
         options:
           - debug
           - release
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -26,14 +26,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: "temurin"
+          java-version: "17"
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -41,10 +41,10 @@ jobs:
       - name: Expo Prebuild
         run: npx expo prebuild --platform android --clean
 
-- name: Setup Gradle cache
-  uses: gradle/actions/setup-gradle@v4  # or latest version
-  with:
-    gradle-home-cache-cleanup: true
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: true
 
       - name: Decode Keystore
         run: |
@@ -62,7 +62,7 @@ jobs:
           MYAPP_RELEASE_STORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}
           MYAPP_RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
           EOF
-          
+
           echo "✅ gradle.properties configured"
           echo ""
           echo "📋 Verification (with secrets masked):"
@@ -74,47 +74,74 @@ jobs:
       - name: Configure build.gradle for signing
         run: |
           BUILD_GRADLE="android/app/build.gradle"
-          
+
           echo "📝 Configuring signing..."
-          
+
           # Create backup
           cp "$BUILD_GRADLE" "${BUILD_GRADLE}.backup"
-          
-          # Step 1: Comment out Expo's debug signing in release buildType
-          sed -i 's/signingConfig signingConfigs\.debug/\/\/ signingConfig signingConfigs.debug (disabled)/g' "$BUILD_GRADLE"
-          
-          # Step 2: Create signing config block with proper property syntax
-          {
-            echo ""
-            echo "    signingConfigs {"
-            echo "        release {"
-            echo "            storeFile file('release.keystore')"
-            echo "            storePassword project.property('MYAPP_RELEASE_STORE_PASSWORD')"
-            echo "            keyAlias project.property('MYAPP_RELEASE_KEY_ALIAS')"
-            echo "            keyPassword project.property('MYAPP_RELEASE_KEY_PASSWORD')"
-            echo "        }"
-            echo "    }"
-          } > /tmp/signing_block.gradle
-          
-          # Step 3: Insert signing config after defaultConfig
-          LINE_NUM=$(grep -n "^    }$" "$BUILD_GRADLE" | head -1 | cut -d: -f1)
-          
-          if [ -n "$LINE_NUM" ]; then
-            head -n "$LINE_NUM" "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
-            cat /tmp/signing_block.gradle >> "${BUILD_GRADLE}.tmp"
-            tail -n +$((LINE_NUM + 1)) "$BUILD_GRADLE" >> "${BUILD_GRADLE}.tmp"
-            mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
-            echo "✅ Signing config inserted"
+
+          # Check if signingConfigs block already exists
+          if grep -q "signingConfigs {" "$BUILD_GRADLE"; then
+            echo "Found existing signingConfigs block, adding release config to it..."
+            
+            # Add release config inside existing signingConfigs block
+            sed -i '/signingConfigs {/a\
+              release {\
+                  storeFile file('"'"'release.keystore'"'"')\
+                  storePassword project.property('"'"'MYAPP_RELEASE_STORE_PASSWORD'"'"')\
+                  keyAlias project.property('"'"'MYAPP_RELEASE_KEY_ALIAS'"'"')\
+                  keyPassword project.property('"'"'MYAPP_RELEASE_KEY_PASSWORD'"'"')\
+              }' "$BUILD_GRADLE"
+          else
+            echo "No existing signingConfigs block, creating new one..."
+            
+            # Create complete signing config block
+            {
+              echo ""
+              echo "    signingConfigs {"
+              echo "        release {"
+              echo "            storeFile file('release.keystore')"
+              echo "            storePassword project.property('MYAPP_RELEASE_STORE_PASSWORD')"
+              echo "            keyAlias project.property('MYAPP_RELEASE_KEY_ALIAS')"
+              echo "            keyPassword project.property('MYAPP_RELEASE_KEY_PASSWORD')"
+              echo "        }"
+              echo "    }"
+            } > /tmp/signing_block.gradle
+            
+            # Insert after defaultConfig
+            LINE_NUM=$(grep -n "^    }$" "$BUILD_GRADLE" | head -1 | cut -d: -f1)
+            
+            if [ -n "$LINE_NUM" ]; then
+              head -n "$LINE_NUM" "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
+              cat /tmp/signing_block.gradle >> "${BUILD_GRADLE}.tmp"
+              tail -n +$((LINE_NUM + 1)) "$BUILD_GRADLE" >> "${BUILD_GRADLE}.tmp"
+              mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
+            fi
           fi
-          
-          # Step 4: Add signingConfig to release buildType
-          sed -i '/buildTypes {/,/release {/ { /release {/ a\            signingConfig signingConfigs.release
+
+          # Ensure release buildType uses release signing config
+          # First, comment out any debug signing in release block
+          sed -i '/buildTypes {/,/^    }$/ {
+            /release {/,/^        }$/ {
+              s/signingConfig signingConfigs\.debug/\/\/ signingConfig signingConfigs.debug (disabled)/g
+            }
           }' "$BUILD_GRADLE"
-          
+
+          # Add release signing config if not present
+          if ! grep -A 10 "release {" "$BUILD_GRADLE" | grep -q "signingConfig signingConfigs.release"; then
+            sed -i '/buildTypes {/,/release {/ {
+              /release {/a\
+                  signingConfig signingConfigs.release
+            }' "$BUILD_GRADLE"
+          fi
+
           echo "✅ Signing configuration complete"
           echo ""
           echo "📋 Final signing configuration:"
-          grep -A 8 "signingConfigs {" "$BUILD_GRADLE" | head -10
+          grep -A 15 "signingConfigs {" "$BUILD_GRADLE" | head -20
+          echo ""
+          echo "📋 Release buildType configuration:"
+          grep -A 10 "release {" "$BUILD_GRADLE" | head -12
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
@@ -126,11 +153,11 @@ jobs:
         run: |
           echo "📋 Checking gradle.properties..."
           cat android/gradle.properties | grep MYAPP_ || echo "⚠️ Properties not found in gradle.properties"
-          
+
           echo ""
           echo "📋 Checking if keystore exists..."
           ls -lh android/app/release.keystore || echo "❌ Keystore not found!"
-          
+
           echo ""
           echo "📋 Testing property access..."
           cd android
@@ -139,7 +166,7 @@ jobs:
       - name: Build Signed APK with explicit signing
         run: |
           cd android
-          
+
           echo "🔨 Building with signing..."
           ./gradlew assembleRelease \
             -PMYAPP_RELEASE_STORE_FILE=release.keystore \
@@ -149,7 +176,7 @@ jobs:
             --no-daemon \
             --stacktrace \
             --info 2>&1 | tee build.log
-          
+
           echo ""
           echo "📋 Checking build log for signing..."
           if grep -i "signing" build.log | grep -i "release"; then
@@ -172,15 +199,15 @@ jobs:
       - name: Verify APK signature
         run: |
           APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-          
+
           if [ ! -f "$APK_PATH" ]; then
             echo "❌ APK not found!"
             exit 1
           fi
-          
+
           echo "📦 Verifying: $APK_PATH"
           echo ""
-          
+
           # List all META-INF files
           echo "=== META-INF Directory Contents ==="
           unzip -l "$APK_PATH" | grep "META-INF/" || {
@@ -188,10 +215,10 @@ jobs:
             exit 1
           }
           echo ""
-          
+
           # Find certificate file
           CERT_FILE=$(unzip -l "$APK_PATH" | grep -o "META-INF/[A-Z0-9]*\.RSA" | head -1)
-          
+
           if [ -z "$CERT_FILE" ]; then
             echo "❌ No RSA certificate found in APK!"
             echo "This means the APK was not signed at all."
@@ -200,17 +227,17 @@ jobs:
             grep -A 15 "signingConfigs" android/app/build.gradle
             exit 1
           fi
-          
+
           echo "=== Certificate Information ==="
           echo "Certificate file: $CERT_FILE"
           unzip -p "$APK_PATH" "$CERT_FILE" | keytool -printcert
-          
+
           echo ""
           echo "=== SHA1 Fingerprint ==="
           SHA1=$(unzip -p "$APK_PATH" "$CERT_FILE" | keytool -printcert | grep "SHA1:" | awk '{print $2}')
           echo "Current SHA1: $SHA1"
           echo "Expected SHA1: 59:3D:24:BE:25:91:DF:54:6E:A8:06:17:DC:A1:73:81:3E:71:4C:A0"
-          
+
           if [ "$SHA1" == "59:3D:24:BE:25:91:DF:54:6E:A8:06:17:DC:A1:73:81:3E:71:4C:A0" ]; then
             echo "✅ ✅ ✅ CORRECT KEYSTORE! ✅ ✅ ✅"
           else
