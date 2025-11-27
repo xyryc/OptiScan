@@ -71,39 +71,14 @@ jobs:
           echo "MYAPP_RELEASE_STORE_PASSWORD=***"
           echo "MYAPP_RELEASE_KEY_PASSWORD=***"
 
-      - name: Configure build.gradle for signing (Robust)
+      - name: Configure build.gradle for signing
         run: |
           BUILD_GRADLE="android/app/build.gradle"
           cp "$BUILD_GRADLE" "${BUILD_GRADLE}.backup"
 
-          cat > /tmp/signing_patch.gradle << 'EOF'
-          // Find the signingConfigs block and add release config
-          android {
-              signingConfigs {
-                  release {
-                      // Read from gradle.properties
-                      def propsFile = rootProject.file('gradle.properties')
-                      if (propsFile.exists()) {
-                          def props = new Properties()
-                          propsFile.withInputStream { props.load(it) }
-                          
-                          storeFile file(props['MYAPP_RELEASE_STORE_FILE'])
-                          storePassword props['MYAPP_RELEASE_STORE_PASSWORD']
-                          keyAlias props['MYAPP_RELEASE_KEY_ALIAS']
-                          keyPassword props['MYAPP_RELEASE_KEY_PASSWORD']
-                      } else if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {
-                          // Fallback to project properties from command line
-                          storeFile file(project.property('MYAPP_RELEASE_STORE_FILE'))
-                          storePassword project.property('MYAPP_RELEASE_STORE_PASSWORD')
-                          keyAlias project.property('MYAPP_RELEASE_KEY_ALIAS')
-                          keyPassword project.property('MYAPP_RELEASE_KEY_PASSWORD')
-                      }
-                  }
-              }
-          }
-          EOF
+          echo "📝 Adding release signing config..."
 
-          # Insert the release config into existing signingConfigs
+          # Add release signing config to signingConfigs block
           awk '
           /signingConfigs \{/ {
               print
@@ -120,22 +95,32 @@ jobs:
               print "        }"
               next
           }
-          /release \{/ && in_buildtypes {
-              print
-              print "            signingConfig signingConfigs.release"
-              next
-          }
-          /buildTypes \{/ { in_buildtypes=1 }
-          /^    \}/ { in_buildtypes=0 }
           { print }
-          ' "$BUILD_GRADLE" > "${BUILD_GRADLE}.new"
+          ' "$BUILD_GRADLE" > "${BUILD_GRADLE}.tmp"
+          mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
 
-          mv "${BUILD_GRADLE}.new" "$BUILD_GRADLE"
+          echo "📝 Removing conflicting debug signing from release buildType..."
+
+          # Remove ALL signingConfig lines from release buildType, then add back the correct one
+          sed -i '/buildTypes {/,/^    }$/ {
+              /release {/,/^        }$/ {
+                  /signingConfig/d
+              }
+          }' "$BUILD_GRADLE"
+
+          # Add the correct signingConfig at the start of release block
+          sed -i '/buildTypes {/,/^    }$/ {
+              /release {/a\
+                  signingConfig signingConfigs.release
+          }' "$BUILD_GRADLE"
 
           echo "✅ Configuration complete"
           echo ""
-          echo "📋 Signing configuration:"
+          echo "📋 Final configuration:"
           grep -B 2 -A 30 "signingConfigs {" "$BUILD_GRADLE"
+          echo ""
+          echo "📋 Release buildType:"
+          grep -A 15 "release {" "$BUILD_GRADLE" | head -20
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
