@@ -1,3 +1,20 @@
+name: Build Signed Android APK/AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - debug
+          - release
+  push:
+    tags:
+      - "v*.*.*"
+
 jobs:
   build-android:
     runs-on: ubuntu-latest
