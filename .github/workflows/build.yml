@@ -18,135 +18,184 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
-    
+    env:
+      # Make the keystore path explicit – we keep it in the repo root.
+      KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+
     steps:
+      # -------------------------------------------------
+      # 0️⃣ Checkout & basic tooling
+      # -------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: "temurin"
+          java-version: "17"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      # -------------------------------------------------
+      # 1️⃣ Install npm deps
+      # -------------------------------------------------
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm ci --legacy-peer-deps   # faster & reproducible
 
+      # -------------------------------------------------
+      # 2️⃣ Expo pre‑build (generates the Android project)
+      # -------------------------------------------------
       - name: Expo Prebuild
         run: npx expo prebuild --platform android --clean
 
+      # -------------------------------------------------
+      # 3️⃣ Gradle cache (speeds up later runs)
+      # -------------------------------------------------
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-home-cache-cleanup: true
 
+      # -------------------------------------------------
+      # 4️⃣ Decode the Keystore (store it where every step can read it)
+      # -------------------------------------------------
       - name: Decode Keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > release.keystore
-          echo "✅ Keystore decoded to release.keystore"
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          echo "✅ Keystore written to $KEYSTORE_PATH"
 
+      # -------------------------------------------------
+      # 5️⃣ Make gradlew executable
+      # -------------------------------------------------
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      # Build the UNsigned Release APK
+      # -------------------------------------------------
+      # 6️⃣ Build the **unsigned** Release APK
+      # -------------------------------------------------
       - name: Build Release APK (Unsigned)
         run: |
           cd android
           ./gradlew assembleRelease --no-daemon
 
-      # Sign the APK manually using apksigner
+      # -------------------------------------------------
+      # 7️⃣ Sign the APK (fixed – keystore path correct)
+      # -------------------------------------------------
       - name: Sign APK
         id: sign_apk
         run: |
           cd android
+
+          # 7.1 Locate the unsigned APK (covers both *-unsigned.apk and fallback *-release.apk)
           APK_PATH=$(find ./app/build/outputs/apk/release \
-                      \( -name "*-release-unsigned.apk" -o -name "*-release.apk" \) \
-                      -print -quit)
+                     \( -name "*-release-unsigned.apk" -o -name "*-release.apk" \) \
+                     -print -quit)
 
           if [[ -z "$APK_PATH" ]]; then
-            echo "❌ No APK found! Exiting."
+            echo "❌ No APK found – aborting."
             exit 1
           fi
-
           echo "📦 Found APK: $APK_PATH"
 
+          # 7.2 Pick the newest build‑tools folder (no hard‑coded version)
           BUILD_TOOLS_DIR=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
           ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/zipalign"
           APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/apksigner"
 
+          # 7.3 Align the APK (required before signing)
           "$ZIPALIGN" -v -p 4 "$APK_PATH" release-aligned.apk
+          echo "✅ Aligned → release-aligned.apk"
+
+          # 7.4 Sign the aligned APK
           "$APKSIGNER" sign \
-            --ks release.keystore \
+            --ks "$KEYSTORE_PATH" \
             --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
             --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
             --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
             --out release-signed.apk \
             release-aligned.apk
 
-          echo "✅ APK signed"
+          echo "✅ Signed APK → release-signed.apk"
           echo "signed_apk_path=release-signed.apk" >> $GITHUB_OUTPUT
 
-
-      # Build the AAB (Android App Bundle)
+      # -------------------------------------------------
+      # 8️⃣ Build the Release AAB (Android App Bundle)
+      # -------------------------------------------------
       - name: Build Release AAB
         run: |
           cd android
           ./gradlew bundleRelease --no-daemon
 
-      # Sign the AAB manually using jarsigner
+      # -------------------------------------------------
+      # 9️⃣ Sign the AAB (jarsigner) – note the keystore path is the same file
+      # -------------------------------------------------
       - name: Sign AAB
         run: |
-          # Find the AAB
-          AAB_PATH=$(find android/app/build/outputs/bundle/release -name "*-release.aab" | head -1)
-          echo "Found AAB: $AAB_PATH"
-          
-          # Sign using jarsigner (AABs use jarsigner, not apksigner)
+          cd android
+          AAB_PATH=$(find ./app/build/outputs/bundle/release -name "*-release.aab" -print -quit)
+
+          if [[ -z "$AAB_PATH" ]]; then
+            echo "❌ No AAB found – aborting."
+            exit 1
+          fi
+          echo "📦 Found AAB: $AAB_PATH"
+
           jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-            -keystore release.keystore \
+            -keystore "$KEYSTORE_PATH" \
             -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
             -keypass "${{ secrets.KEY_PASSWORD }}" \
             "$AAB_PATH" "${{ secrets.KEY_ALIAS }}"
-            
-          mv "$AAB_PATH" release-signed.aab
-          echo "✅ AAB Signed successfully"
 
+          mv "$AAB_PATH" release-signed.aab
+          echo "✅ Signed AAB → release-signed.aab"
+
+      # -------------------------------------------------
+      # 🔍 Verify the signed APK (dynamic build‑tools path)
+      # -------------------------------------------------
       - name: Verify APK signature
         run: |
-          echo "📦 Verifying: release-signed.apk"
-          
-          # Use apksigner verify which is more robust
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs release-signed.apk
-          
-          # Quick check for your specific SHA1 if needed
-          SHA1=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs release-signed.apk | 
-          grep "SHA-1 digest:" | head -1 | awk '{print $3}')
-          echo "Detected SHA1: $SHA1"
+          BUILD_TOOLS_DIR=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/apksigner"
 
+          echo "📦 Verifying: release-signed.apk"
+          "$APKSIGNER" verify --print-certs release-signed.apk
+
+          # Optional: extract the SHA‑1 fingerprint for further checks
+          SHA1=$("$APKSIGNER" verify --print-certs release-signed.apk |
+                grep "SHA-1 digest:" | head -1 | awk '{print $3}')
+          echo "Detected SHA‑1: $SHA1"
+
+      # -------------------------------------------------
+      # 📦 Upload the signed artifacts
+      # -------------------------------------------------
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk-${{ github.run_number }}
-          path: release-signed.apk
+          path: android/release-signed.apk
           retention-days: 30
 
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-aab-${{ github.run_number }}
-          path: release-signed.aab
+          path: android/release-signed.aab
           retention-days: 30
 
+      # -------------------------------------------------
+      # 🧹 Secure cleanup (always runs, even on failure)
+      # -------------------------------------------------
       - name: Cleanup sensitive files
         if: always()
         run: |
-          rm -f release.keystore
-          echo "✅ Cleanup completed"
+          rm -f "$KEYSTORE_PATH"
+          echo "✅ Keystore removed"
