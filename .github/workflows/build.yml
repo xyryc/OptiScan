@@ -67,24 +67,34 @@ jobs:
       - name: Sign APK
         id: sign_apk
         run: |
-          # Find the unsigned APK
-          APK_PATH=$(find android/app/build/outputs/apk/release -name "*-release-unsigned.apk" -o -name 
-          "*-release.apk" | head -1)
-          echo "Found APK: $APK_PATH"
-          
-          # Align the APK (Optimization step required before signing)
-          $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p 4 "$APK_PATH" release-aligned.apk
-          
-          # Sign the APK
-          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release.keystore \
+          cd android
+          APK_PATH=$(find ./app/build/outputs/apk/release \
+                      \( -name "*-release-unsigned.apk" -o -name "*-release.apk" \) \
+                      -print -quit)
+
+          if [[ -z "$APK_PATH" ]]; then
+            echo "❌ No APK found! Exiting."
+            exit 1
+          fi
+
+          echo "📦 Found APK: $APK_PATH"
+
+          BUILD_TOOLS_DIR=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/apksigner"
+
+          "$ZIPALIGN" -v -p 4 "$APK_PATH" release-aligned.apk
+          "$APKSIGNER" sign \
+            --ks release.keystore \
             --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
             --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
             --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
             --out release-signed.apk \
             release-aligned.apk
 
-          echo "✅ APK Signed successfully"
+          echo "✅ APK signed"
           echo "signed_apk_path=release-signed.apk" >> $GITHUB_OUTPUT
+
 
       # Build the AAB (Android App Bundle)
       - name: Build Release AAB
