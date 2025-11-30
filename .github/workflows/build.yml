@@ -19,13 +19,11 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     env:
-      # Make the keystore path explicit – we keep it in the repo root.
       KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+      # Ensure Gradle user home is explicit and consistent for caching
+      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-user-home
 
     steps:
-      # -------------------------------------------------
-      # 0️⃣ Checkout & basic tooling
-      # -------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -44,59 +42,59 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # -------------------------------------------------
-      # 1️⃣ Install npm deps
-      # -------------------------------------------------
-      - name: Install dependencies
-        run: npm ci --legacy-peer-deps   # faster & reproducible
+      # Ensure ANDROID_SDK_ROOT is set (use known runner path when available)
+      - name: Ensure ANDROID_SDK_ROOT
+        shell: bash
+        run: |
+          if [ -z "${ANDROID_SDK_ROOT:-}" ] && [ -d "/usr/local/lib/android/sdk" ]; then
+            echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          fi
+          # print for debugging
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$(cat $GITHUB_ENV 2>/dev/null | sed -n 's/^ANDROID_SDK_ROOT=//p' || true)}"
 
-      # -------------------------------------------------
-      # 2️⃣ Expo pre‑build (generates the Android project)
-      # -------------------------------------------------
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      # Expo prebuild generates the android project (creates gradlew etc.)
       - name: Expo Prebuild
         run: npx expo prebuild --platform android --clean
 
-      # -------------------------------------------------
-      # 3️⃣ Gradle cache (speeds up later runs)
-      # -------------------------------------------------
+      # Make gradlew executable immediately after prebuild so subsequent steps can run it
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      # Setup Gradle cache (non-fatal on cache service issues)
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
+        continue-on-error: true
         with:
           gradle-home-cache-cleanup: true
 
-      # -------------------------------------------------
-      # 4️⃣ Decode the Keystore (store it where every step can read it)
-      # -------------------------------------------------
+      # Ensure Gradle distribution is downloaded via the wrapper (resilient fallback)
+      - name: Ensure Gradle distribution (force wrapper download)
+        run: |
+          cd android
+          # Try running a cheap Gradle task to trigger a download if the distribution isn't present.
+          ./gradlew --no-daemon -v || (echo "Gradle wrapper failed to run; printing wrapper properties for debug" && cat gradle/wrapper/gradle-wrapper.properties && exit 1)
+
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_PATH"
           chmod 600 "$KEYSTORE_PATH"
           echo "✅ Keystore written to $KEYSTORE_PATH"
 
-      # -------------------------------------------------
-      # 5️⃣ Make gradlew executable
-      # -------------------------------------------------
-      - name: Make gradlew executable
-        run: chmod +x android/gradlew
-
-      # -------------------------------------------------
-      # 6️⃣ Build the **unsigned** Release APK
-      # -------------------------------------------------
+      # Build APK (unsigned)
       - name: Build Release APK (Unsigned)
         run: |
           cd android
           ./gradlew assembleRelease --no-daemon
 
-      # -------------------------------------------------
-      # 7️⃣ Sign the APK
-      # -------------------------------------------------
       - name: Sign APK
         id: sign_apk
         run: |
           set -euo pipefail
           cd android
 
-          # locate the unsigned APK (covers both *-unsigned.apk and fallback *-release.apk)
           APK_PATH=$(find ./app/build/outputs/apk/release \
                      \( -name "*-release-unsigned.apk" -o -name "*-release.apk" \) \
                      -print -quit)
@@ -107,23 +105,19 @@ jobs:
           fi
           echo "📦 Found APK: $APK_PATH"
 
-          # Use ANDROID_SDK_ROOT fallback if ANDROID_HOME is not set
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           if [[ -z "$SDK_ROOT" ]]; then
             echo "❌ ANDROID_HOME and ANDROID_SDK_ROOT are not set – aborting."
             exit 1
           fi
 
-          # Pick the newest build-tools folder (no hard‑coded version)
           BUILD_TOOLS_DIR=$(ls -1 "$SDK_ROOT/build-tools" | sort -V | tail -n1)
           ZIPALIGN="$SDK_ROOT/build-tools/$BUILD_TOOLS_DIR/zipalign"
           APKSIGNER="$SDK_ROOT/build-tools/$BUILD_TOOLS_DIR/apksigner"
 
-          # Align the APK (required before signing)
           "$ZIPALIGN" -v -p 4 "$APK_PATH" release-aligned.apk
           echo "✅ Aligned → release-aligned.apk"
 
-          # Sign the aligned APK
           "$APKSIGNER" sign \
             --ks "$KEYSTORE_PATH" \
             --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
@@ -133,49 +127,55 @@ jobs:
             release-aligned.apk
 
           echo "✅ Signed APK → release-signed.apk"
-          # We keep the signed APK inside the android/ directory (repo path: android/release-signed.apk)
           echo "signed_apk_path=android/release-signed.apk" >> $GITHUB_OUTPUT
 
-      # -------------------------------------------------
-      # 8️⃣ Build the Release AAB (Android App Bundle)
-      # -------------------------------------------------
       - name: Build Release AAB
         run: |
           cd android
           ./gradlew bundleRelease --no-daemon
 
-      # -------------------------------------------------
-      # 9️⃣ Sign the AAB (jarsigner)
-      # -------------------------------------------------
-      - name: Sign AAB
+      # Sign AAB: remove any existing META-INF signature files first to avoid multiple chains
+      - name: Sign AAB (remove existing signatures first)
         run: |
+          set -euo pipefail
           cd android
-          AAB_PATH=$(find ./app/build/outputs/bundle/release -name "*-release.aab" -print -quit)
 
+          AAB_PATH=$(find ./app/build/outputs/bundle/release -name "*-release.aab" -print -quit)
           if [[ -z "$AAB_PATH" ]]; then
             echo "❌ No AAB found – aborting."
             exit 1
           fi
           echo "📦 Found AAB: $AAB_PATH"
 
+          echo "🔍 Removing pre-existing signature files from META-INF (if any)..."
+          # remove common signature files from META-INF inside the zip (aab is a zip)
+          zip -d "$AAB_PATH" "META-INF/*.SF" "META-INF/*.RSA" "META-INF/*.DSA" "META-INF/*.EC" >/dev/null 2>&1 || true
+
+          echo "📄 META-INF after cleanup (first 200 lines):"
+          unzip -l "$AAB_PATH" "META-INF/*" | sed -n '1,200p' || true
+
+          echo "🔐 Signing AAB with jarsigner..."
           jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
             -keystore "$KEYSTORE_PATH" \
             -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
             -keypass "${{ secrets.KEY_PASSWORD }}" \
             "$AAB_PATH" "${{ secrets.KEY_ALIAS }}"
 
-          # Move signed AAB to android/release-signed.aab (kept inside android/ directory)
           mv "$AAB_PATH" release-signed.aab
           echo "✅ Signed AAB → android/release-signed.aab"
 
-      # -------------------------------------------------
-      # 🔍 Verify the signed APK (uses the same android/release-signed.apk path)
-      # -------------------------------------------------
+          CERT_COUNT=$(unzip -Z1 release-signed.aab | grep -Eo 'META-INF/[^/]+\.(RSA|DSA|EC)' | sort -u | wc -l || true)
+          echo "Detected META-INF certificate files (count): $CERT_COUNT"
+          if [[ "$CERT_COUNT" -gt 1 ]]; then
+            echo "❌ There are still multiple certificate files in META-INF. Aborting to avoid Play Store rejection."
+            exit 1
+          fi
+          echo "✅ AAB has a single certificate chain."
+
       - name: Verify APK signature
         run: |
           set -euo pipefail
 
-          # Use ANDROID_SDK_ROOT fallback if ANDROID_HOME is not set
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           if [[ -z "$SDK_ROOT" ]]; then
             echo "❌ ANDROID_HOME and ANDROID_SDK_ROOT are not set – aborting."
@@ -194,14 +194,10 @@ jobs:
           echo "📦 Verifying: $APK_FILE"
           "$APKSIGNER" verify --print-certs "$APK_FILE"
 
-          # Optional: extract the SHA‑1 fingerprint for further checks
           SHA1=$("$APKSIGNER" verify --print-certs "$APK_FILE" |
                 grep "SHA-1 digest:" | head -1 | awk '{print $3}')
           echo "Detected SHA‑1: $SHA1"
 
-      # -------------------------------------------------
-      # 📦 Upload the signed artifacts
-      # -------------------------------------------------
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -216,9 +212,6 @@ jobs:
           path: android/release-signed.aab
           retention-days: 30
 
-      # -------------------------------------------------
-      # 🧹 Secure cleanup (always runs, even on failure)
-      # -------------------------------------------------
       - name: Cleanup sensitive files
         if: always()
         run: |
