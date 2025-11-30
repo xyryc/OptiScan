@@ -88,14 +88,15 @@ jobs:
           ./gradlew assembleRelease --no-daemon
 
       # -------------------------------------------------
-      # 7️⃣ Sign the APK (fixed – keystore path correct)
+      # 7️⃣ Sign the APK
       # -------------------------------------------------
       - name: Sign APK
         id: sign_apk
         run: |
+          set -euo pipefail
           cd android
 
-          # 7.1 Locate the unsigned APK (covers both *-unsigned.apk and fallback *-release.apk)
+          # locate the unsigned APK (covers both *-unsigned.apk and fallback *-release.apk)
           APK_PATH=$(find ./app/build/outputs/apk/release \
                      \( -name "*-release-unsigned.apk" -o -name "*-release.apk" \) \
                      -print -quit)
@@ -106,16 +107,23 @@ jobs:
           fi
           echo "📦 Found APK: $APK_PATH"
 
-          # 7.2 Pick the newest build‑tools folder (no hard‑coded version)
-          BUILD_TOOLS_DIR=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
-          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/zipalign"
-          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/apksigner"
+          # Use ANDROID_SDK_ROOT fallback if ANDROID_HOME is not set
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$SDK_ROOT" ]]; then
+            echo "❌ ANDROID_HOME and ANDROID_SDK_ROOT are not set – aborting."
+            exit 1
+          fi
 
-          # 7.3 Align the APK (required before signing)
+          # Pick the newest build-tools folder (no hard‑coded version)
+          BUILD_TOOLS_DIR=$(ls -1 "$SDK_ROOT/build-tools" | sort -V | tail -n1)
+          ZIPALIGN="$SDK_ROOT/build-tools/$BUILD_TOOLS_DIR/zipalign"
+          APKSIGNER="$SDK_ROOT/build-tools/$BUILD_TOOLS_DIR/apksigner"
+
+          # Align the APK (required before signing)
           "$ZIPALIGN" -v -p 4 "$APK_PATH" release-aligned.apk
           echo "✅ Aligned → release-aligned.apk"
 
-          # 7.4 Sign the aligned APK
+          # Sign the aligned APK
           "$APKSIGNER" sign \
             --ks "$KEYSTORE_PATH" \
             --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
@@ -125,7 +133,8 @@ jobs:
             release-aligned.apk
 
           echo "✅ Signed APK → release-signed.apk"
-          echo "signed_apk_path=release-signed.apk" >> $GITHUB_OUTPUT
+          # We keep the signed APK inside the android/ directory (repo path: android/release-signed.apk)
+          echo "signed_apk_path=android/release-signed.apk" >> $GITHUB_OUTPUT
 
       # -------------------------------------------------
       # 8️⃣ Build the Release AAB (Android App Bundle)
@@ -136,7 +145,7 @@ jobs:
           ./gradlew bundleRelease --no-daemon
 
       # -------------------------------------------------
-      # 9️⃣ Sign the AAB (jarsigner) – note the keystore path is the same file
+      # 9️⃣ Sign the AAB (jarsigner)
       # -------------------------------------------------
       - name: Sign AAB
         run: |
@@ -155,22 +164,38 @@ jobs:
             -keypass "${{ secrets.KEY_PASSWORD }}" \
             "$AAB_PATH" "${{ secrets.KEY_ALIAS }}"
 
+          # Move signed AAB to android/release-signed.aab (kept inside android/ directory)
           mv "$AAB_PATH" release-signed.aab
-          echo "✅ Signed AAB → release-signed.aab"
+          echo "✅ Signed AAB → android/release-signed.aab"
 
       # -------------------------------------------------
-      # 🔍 Verify the signed APK (dynamic build‑tools path)
+      # 🔍 Verify the signed APK (uses the same android/release-signed.apk path)
       # -------------------------------------------------
       - name: Verify APK signature
         run: |
-          BUILD_TOOLS_DIR=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
-          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_DIR/apksigner"
+          set -euo pipefail
 
-          echo "📦 Verifying: release-signed.apk"
-          "$APKSIGNER" verify --print-certs release-signed.apk
+          # Use ANDROID_SDK_ROOT fallback if ANDROID_HOME is not set
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$SDK_ROOT" ]]; then
+            echo "❌ ANDROID_HOME and ANDROID_SDK_ROOT are not set – aborting."
+            exit 1
+          fi
+
+          BUILD_TOOLS_DIR=$(ls -1 "$SDK_ROOT/build-tools" | sort -V | tail -n1)
+          APKSIGNER="$SDK_ROOT/build-tools/$BUILD_TOOLS_DIR/apksigner"
+
+          APK_FILE="android/release-signed.apk"
+          if [[ ! -f "$APK_FILE" ]]; then
+            echo "❌ $APK_FILE not found – aborting."
+            exit 1
+          fi
+
+          echo "📦 Verifying: $APK_FILE"
+          "$APKSIGNER" verify --print-certs "$APK_FILE"
 
           # Optional: extract the SHA‑1 fingerprint for further checks
-          SHA1=$("$APKSIGNER" verify --print-certs release-signed.apk |
+          SHA1=$("$APKSIGNER" verify --print-certs "$APK_FILE" |
                 grep "SHA-1 digest:" | head -1 | awk '{print $3}')
           echo "Detected SHA‑1: $SHA1"
 
