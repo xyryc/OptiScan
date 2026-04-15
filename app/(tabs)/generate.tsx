@@ -17,9 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import QRCode from 'react-native-qrcode-svg';
 import ViewShot from 'react-native-view-shot';
-import * as MediaLibrary from 'expo-media-library';
 import * as Haptics from 'expo-haptics';
-import * as Linking from 'expo-linking';
 
 type BarcodeFormat = 'qr' | 'code128' | 'ean13' | 'upc_a' | 'datamatrix' | 'aztec';
 
@@ -129,27 +127,17 @@ export default function GenerateScreen() {
   
   const handleSave = async () => {
     try {
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert(
-          'Permission Required',
-          'Please allow access to Photos to save images.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => Linking.openSettings() },
-          ]
-        );
-        return;
-      }
-      
       const uri = await viewShotRef.current?.capture?.();
       if (uri) {
-        await MediaLibrary.createAssetAsync(uri);
+        await Share.share({
+          url: uri,
+          message: `Generated ${FORMATS.find(f => f.value === selectedFormat)?.label} barcode`,
+        });
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        Alert.alert('Success', 'Barcode saved to Photos');
+        Alert.alert('Saved', 'Use the Share sheet to save the image to your device.');
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to save barcode');
+      Alert.alert('Error', 'Failed to prepare barcode image');
     }
   };
   
