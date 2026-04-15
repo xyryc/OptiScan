@@ -71,22 +71,109 @@ function updateVersioning(env) {
     fail(`Invalid expo.android.versionCode in ${appConfigJsonPath}: ${versionCodeRaw}`);
   }
 
+  console.log(
+    `Skipping android/app/build.gradle version replacement. app.config.json has version=${appVersion}, android.versionCode=${versionCode}`
+  );
+}
+
+function findBlock(content, blockName, fromIndex = 0, limitEnd = content.length) {
+  const blockRegex = new RegExp(`\\b${blockName}\\s*\\{`, "g");
+  blockRegex.lastIndex = fromIndex;
+  const match = blockRegex.exec(content);
+  if (!match || match.index >= limitEnd) {
+    return null;
+  }
+
+  const braceStart = content.indexOf("{", match.index);
+  if (braceStart === -1 || braceStart >= limitEnd) {
+    return null;
+  }
+
+  let depth = 0;
+  for (let i = braceStart; i < limitEnd; i += 1) {
+    const ch = content[i];
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          start: match.index,
+          end: i + 1,
+          innerStart: braceStart + 1,
+          innerEnd: i,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function ensureAndroidReleaseSigningConfig() {
   const buildGradlePath = path.join(ROOT_DIR, "android", "app", "build.gradle");
   if (!fs.existsSync(buildGradlePath)) {
     fail(`Missing file: ${buildGradlePath}`);
   }
 
   let gradleContent = fs.readFileSync(buildGradlePath, "utf8");
-  const beforeGradleContent = gradleContent;
-  gradleContent = gradleContent.replace(/versionCode\s+\d+/, `versionCode ${versionCode}`);
-  gradleContent = gradleContent.replace(/versionName\s+"[^"]+"/, `versionName "${appVersion}"`);
+  const originalContent = gradleContent;
 
-  if (beforeGradleContent === gradleContent) {
-    fail(`Could not update version fields in: ${buildGradlePath}`);
+  const signingConfigsBlock = findBlock(gradleContent, "signingConfigs");
+  if (!signingConfigsBlock) {
+    fail(`Could not find signingConfigs block in: ${buildGradlePath}`);
   }
 
-  fs.writeFileSync(buildGradlePath, gradleContent, "utf8");
-  console.log(`Applied app.config.json version to Android native: ${appVersion} (${versionCode})`);
+  const signingConfigsInner = gradleContent.slice(signingConfigsBlock.innerStart, signingConfigsBlock.innerEnd);
+  if (!/\brelease\s*\{/.test(signingConfigsInner)) {
+    const releaseSigningBlock =
+      "\n        release {\n" +
+      "            if (project.hasProperty('MYAPP_UPLOAD_STORE_FILE')) {\n" +
+      "                storeFile file(MYAPP_UPLOAD_STORE_FILE)\n" +
+      "                storePassword MYAPP_UPLOAD_STORE_PASSWORD\n" +
+      "                keyAlias MYAPP_UPLOAD_KEY_ALIAS\n" +
+      "                keyPassword MYAPP_UPLOAD_KEY_PASSWORD\n" +
+      "            }\n" +
+      "        }\n";
+    gradleContent =
+      gradleContent.slice(0, signingConfigsBlock.innerEnd) +
+      releaseSigningBlock +
+      gradleContent.slice(signingConfigsBlock.innerEnd);
+  }
+
+  const buildTypesBlock = findBlock(gradleContent, "buildTypes");
+  if (!buildTypesBlock) {
+    fail(`Could not find buildTypes block in: ${buildGradlePath}`);
+  }
+
+  const releaseBuildTypeBlock = findBlock(
+    gradleContent,
+    "release",
+    buildTypesBlock.innerStart,
+    buildTypesBlock.innerEnd
+  );
+  if (!releaseBuildTypeBlock) {
+    fail(`Could not find buildTypes.release block in: ${buildGradlePath}`);
+  }
+
+  const releaseBuildInner = gradleContent.slice(releaseBuildTypeBlock.innerStart, releaseBuildTypeBlock.innerEnd);
+  if (/signingConfig\s+signingConfigs\./.test(releaseBuildInner)) {
+    gradleContent =
+      gradleContent.slice(0, releaseBuildTypeBlock.innerStart) +
+      releaseBuildInner.replace(/signingConfig\s+signingConfigs\.\w+/, "signingConfig signingConfigs.release") +
+      gradleContent.slice(releaseBuildTypeBlock.innerEnd);
+  } else {
+    gradleContent =
+      gradleContent.slice(0, releaseBuildTypeBlock.innerStart) +
+      "\n            signingConfig signingConfigs.release" +
+      gradleContent.slice(releaseBuildTypeBlock.innerStart);
+  }
+
+  if (gradleContent !== originalContent) {
+    fs.writeFileSync(buildGradlePath, gradleContent, "utf8");
+    console.log("Updated android/app/build.gradle for release signing (signingConfigs.release).");
+  } else {
+    console.log("android/app/build.gradle release signing is already configured.");
+  }
 }
 
 function runGradleTask(androidDir, task, gradleArgs) {
@@ -117,6 +204,7 @@ requireVar(env, "ANDROID_KEYSTORE_PATH");
 requireVar(env, "ANDROID_KEYSTORE_PASSWORD");
 requireVar(env, "ANDROID_KEY_ALIAS");
 updateVersioning(env);
+ensureAndroidReleaseSigningConfig();
 
 const keyPassword =
   env.ANDROID_KEY_PASSWORD && String(env.ANDROID_KEY_PASSWORD).trim() !== ""
