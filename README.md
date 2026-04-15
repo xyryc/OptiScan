@@ -40,6 +40,54 @@ An iOS-styled universal barcode scanner and generator mobile app built with Reac
    - **Android**: Press `a` or scan QR code with Expo Go
    - **Web**: Press `w` (limited functionality)
 
+## 📦 Android Release Script
+
+Use the script to build signed Android release artifacts from `.env` values.
+
+Required `.env` variables:
+
+```env
+ANDROID_KEYSTORE_PATH=./release.keystore
+ANDROID_KEYSTORE_PASSWORD=your_store_password
+ANDROID_KEY_ALIAS=optiscan
+ANDROID_KEY_PASSWORD=your_key_password
+```
+
+If `ANDROID_KEY_PASSWORD` is empty, the script uses `ANDROID_KEYSTORE_PASSWORD`.
+The release script reads `version` and `android.versionCode` from `app.config.json`, then applies them to `android/app/build.gradle` before building.
+
+Build commands:
+
+```bash
+node scripts/release-android.js aab
+node scripts/release-android.js apk
+node scripts/release-android.js both
+```
+
+Or via npm scripts:
+
+```bash
+npm run release:android:aab
+npm run release:android:apk
+npm run release:android:both
+```
+
+The script automatically copies the keystore to `android/app/release.keystore` before signing, so it still works after `expo prebuild`.
+
+## ✅ Verify Android Signing
+
+After creating a release build, verify the signatures before uploading:
+
+- **AAB**
+  ```bash
+  jarsigner -verify -verbose -certs android/app/build/outputs/bundle/release/app-release.aab
+  ```
+
+- **APK**
+  ```bash
+  apksigner verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk
+  ```
+
 ## 📱 Project Structure
 
 ```
@@ -59,7 +107,7 @@ OptiScan/
 ├── tailwind.config.js     # TailwindCSS configuration
 ├── metro.config.js        # Metro bundler config
 ├── babel.config.js        # Babel configuration
-└── app.json               # Expo configuration
+└── app.config.json        # Expo configuration
 ```
 
 ## 🎨 Design System
