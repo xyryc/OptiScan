@@ -30,7 +30,7 @@
         "light": "./assets/icons/ios-light.png",
         "tinted": "./assets/icons/ios-tinted.png"
       },
-      "bundleIdentifier": "com.xyryc.OptiScan"
+      "bundleIdentifier": "com.xyryc.optiscan"
     },
     "android": {
       "versionCode": 1,
