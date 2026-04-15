@@ -78,6 +78,11 @@ The script automatically copies the keystore to `android/app/release.keystore` b
 
 After creating a release build, verify the signatures before uploading:
 
+- **Show keystore fingerprint**
+  ```bash
+  keytool -list -v -keystore release.keystore -alias optiscan
+  ```
+
 - **AAB**
   ```bash
   jarsigner -verify -verbose -certs android/app/build/outputs/bundle/release/app-release.aab
