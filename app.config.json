@@ -51,7 +51,7 @@
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.READ_MEDIA_AUDIO"
       ],
-      "package": "com.xyryc.OptiScan"
+      "package": "com.xyryc.optiscan"
     },
     "web": {
       "favicon": "./assets/favicon.png"
